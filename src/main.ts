@@ -70,12 +70,18 @@ type ResizeDragState = {
 
 type RegionKind = 'math' | 'text';
 
+type TextSelectionOffsets = {
+  start: number;
+  end: number;
+};
+
 type TextRegion = {
   id: number;
   x: number;
   y: number;
   kind: RegionKind;
   width: number | null;
+  lastCommittedText: string;
   element: HTMLDivElement;
 };
 
@@ -89,6 +95,9 @@ const DEFAULT_GRID_SIZE = 20;
 const DEFAULT_THEME: WorksheetTheme = 'light';
 const DRAG_THRESHOLD = 4;
 const EDGE_HIT_SIZE = 6;
+const CANONICAL_DEFINITION_OPERATOR = ' := ';
+const SIMPLE_DEFINITION_TARGET_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+
 function clampToGrid(value: number, limit: number, gridSize: number): number {
   const snappedValue = Math.floor(value / gridSize) * gridSize;
   const maximumGridCoordinate = Math.max(
@@ -202,6 +211,130 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function contentContainsSpace(content: string | null | undefined): boolean {
   return /[ \u00a0]/.test(content ?? '');
+}
+
+function getPlainTextContent(content: string | null | undefined): string {
+  return (content ?? '').replace(/\u00a0/g, ' ');
+}
+
+function replaceTextRange(
+  content: string,
+  selection: TextSelectionOffsets,
+  replacement: string,
+): string {
+  return `${content.slice(0, selection.start)}${replacement}${content.slice(selection.end)}`;
+}
+
+function selectionContainsIndex(
+  selection: TextSelectionOffsets,
+  index: number | null,
+): boolean {
+  return index !== null && selection.start <= index && index < selection.end;
+}
+
+function getDefinitionOperatorBounds(
+  content: string,
+): { start: number; colonIndex: number; equalsIndex: number | null; end: number } | null {
+  const colonIndex = content.indexOf(':');
+
+  if (colonIndex === -1) {
+    return null;
+  }
+
+  let start = colonIndex;
+
+  while (start > 0 && content[start - 1] === ' ') {
+    start -= 1;
+  }
+
+  let end = colonIndex + 1;
+  let equalsIndex: number | null = null;
+
+  while (end < content.length && content[end] === ' ') {
+    end += 1;
+  }
+
+  if (content[end] === '=') {
+    equalsIndex = end;
+    end += 1;
+
+    while (end < content.length && content[end] === ' ') {
+      end += 1;
+    }
+  }
+
+  return {
+    start,
+    colonIndex,
+    equalsIndex,
+    end,
+  };
+}
+
+function contentContainsDisallowedMathSpace(content: string | null | undefined): boolean {
+  const plainTextContent = getPlainTextContent(content);
+  const definitionOperatorBounds = getDefinitionOperatorBounds(plainTextContent);
+
+  if (!definitionOperatorBounds) {
+    return contentContainsSpace(plainTextContent);
+  }
+
+  return contentContainsSpace(
+    `${plainTextContent.slice(0, definitionOperatorBounds.start)}${plainTextContent.slice(
+      definitionOperatorBounds.end,
+    )}`,
+  );
+}
+
+function normalizeMathRegionContent(
+  content: string,
+  caretOffset: number,
+): { text: string; caretOffset: number } | null {
+  const plainTextContent = getPlainTextContent(content);
+  const definitionCount = plainTextContent.split(':').length - 1;
+
+  if (definitionCount > 1) {
+    return null;
+  }
+
+  const clampedCaretOffset = Math.min(
+    Math.max(caretOffset, 0),
+    plainTextContent.length,
+  );
+  const definitionOperatorBounds = getDefinitionOperatorBounds(plainTextContent);
+
+  if (!definitionOperatorBounds) {
+    return {
+      text: plainTextContent,
+      caretOffset: clampedCaretOffset,
+    };
+  }
+
+  const definitionTarget = plainTextContent.slice(0, definitionOperatorBounds.start);
+
+  if (!SIMPLE_DEFINITION_TARGET_PATTERN.test(definitionTarget)) {
+    return null;
+  }
+
+  const rightHandSide = plainTextContent.slice(definitionOperatorBounds.end);
+  const nextText = `${definitionTarget}${CANONICAL_DEFINITION_OPERATOR}${rightHandSide}`;
+  const rawOperatorLength =
+    definitionOperatorBounds.end - definitionOperatorBounds.start;
+  const nextCaretOffset =
+    clampedCaretOffset <= definitionOperatorBounds.start
+      ? clampedCaretOffset
+      : clampedCaretOffset >= definitionOperatorBounds.end
+        ? clampedCaretOffset - rawOperatorLength + CANONICAL_DEFINITION_OPERATOR.length
+        : definitionOperatorBounds.start +
+          Math.min(
+            clampedCaretOffset - definitionOperatorBounds.start,
+            CANONICAL_DEFINITION_OPERATOR.length,
+          );
+
+  return {
+    text: nextText,
+    caretOffset: Math.min(nextCaretOffset, nextText.length),
+  };
 }
 
 function getFinitePositiveMetric(
@@ -645,6 +778,11 @@ class WorksheetApp {
       return;
     }
 
+    if (event.key === ':') {
+      event.preventDefault();
+      return;
+    }
+
     event.preventDefault();
 
     const region = this.createRegion(this.caretPosition, event.key);
@@ -660,6 +798,7 @@ class WorksheetApp {
       y: position.y,
       kind: contentContainsSpace(initialText) ? 'text' : 'math',
       width: null,
+      lastCommittedText: initialText,
       element,
     };
 
@@ -709,12 +848,16 @@ class WorksheetApp {
       this.activateRegion(region.id);
     });
 
+    region.element.addEventListener('beforeinput', (event) => {
+      this.handleRegionBeforeInput(region, event as InputEvent);
+    });
+
     region.element.addEventListener('keydown', (event) => {
       this.handleRegionKeyDown(region, event);
     });
 
     region.element.addEventListener('input', () => {
-      this.updateRegionKind(region.id);
+      this.handleRegionInput(region);
     });
 
     region.element.addEventListener('pointermove', (event) => {
@@ -1080,6 +1223,302 @@ class WorksheetApp {
     this.renderCaret();
   }
 
+  private handleRegionBeforeInput(region: TextRegion, event: InputEvent): void {
+    if (region.kind !== 'math' || event.isComposing) {
+      return;
+    }
+
+    const insertedText = this.getInsertedTextForBeforeInput(event);
+
+    if (insertedText === ' ' && this.handleMathDefinitionSpaceCommand(region)) {
+      event.preventDefault();
+      return;
+    }
+
+    const currentText = getPlainTextContent(region.element.textContent);
+
+    if (!this.shouldInterceptMathRegionInput(currentText, event)) {
+      return;
+    }
+
+    const selection = this.getSelectionOffsetsWithinElement(region.element);
+
+    if (!selection) {
+      return;
+    }
+
+    const nextEdit = this.getNextMathRegionTextEdit(currentText, selection, event);
+
+    if (nextEdit === null) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (nextEdit === false) {
+      return;
+    }
+
+    this.applyRegionTextContent(region, nextEdit.text, nextEdit.caretOffset);
+    this.handleRegionInput(region);
+  }
+
+  private handleRegionInput(region: TextRegion): void {
+    const content = getPlainTextContent(region.element.textContent);
+
+    if (region.kind === 'math') {
+      const selection = this.getSelectionOffsetsWithinElement(region.element);
+      const caretOffset = selection?.end ?? content.length;
+      const normalizedContent = normalizeMathRegionContent(content, caretOffset);
+
+      if (!normalizedContent) {
+        if (!content.includes(':')) {
+          region.lastCommittedText = content;
+          this.updateRegionKind(region.id);
+          region.lastCommittedText = getPlainTextContent(region.element.textContent);
+          return;
+        }
+
+        this.applyRegionTextContent(
+          region,
+          region.lastCommittedText,
+          Math.min(caretOffset, region.lastCommittedText.length),
+        );
+        return;
+      }
+
+      if (normalizedContent.text !== content) {
+        this.applyRegionTextContent(
+          region,
+          normalizedContent.text,
+          normalizedContent.caretOffset,
+        );
+      }
+
+      region.lastCommittedText = normalizedContent.text;
+    } else {
+      region.lastCommittedText = content;
+    }
+
+    this.updateRegionKind(region.id);
+    region.lastCommittedText = getPlainTextContent(region.element.textContent);
+  }
+
+  private shouldInterceptMathRegionInput(
+    currentText: string,
+    event: InputEvent,
+  ): boolean {
+    const insertedText = this.getInsertedTextForBeforeInput(event);
+
+    return currentText.includes(':') || insertedText?.includes(':') === true;
+  }
+
+  private getNextMathRegionTextEdit(
+    content: string,
+    selection: TextSelectionOffsets,
+    event: InputEvent,
+  ): { text: string; caretOffset: number } | false | null {
+    const insertedText = this.getInsertedTextForBeforeInput(event);
+
+    if (insertedText !== null) {
+      const adjustedSelection = this.expandSelectionAroundDefinitionOperator(
+        content,
+        selection,
+      );
+
+      return (
+        normalizeMathRegionContent(
+          replaceTextRange(content, adjustedSelection, insertedText),
+          adjustedSelection.start + insertedText.length,
+        ) ?? false
+      );
+    }
+
+    const deletionSelection = this.getDeletionSelection(
+      content,
+      selection,
+      event.inputType,
+    );
+
+    if (!deletionSelection) {
+      return null;
+    }
+
+    return (
+      normalizeMathRegionContent(
+        replaceTextRange(content, deletionSelection, ''),
+        deletionSelection.start,
+      ) ?? false
+    );
+  }
+
+  private getInsertedTextForBeforeInput(event: InputEvent): string | null {
+    switch (event.inputType) {
+      case 'insertText':
+      case 'insertCompositionText':
+      case 'insertReplacementText':
+        return event.data ?? '';
+      case 'insertFromPaste':
+      case 'insertFromDrop':
+        return event.dataTransfer?.getData('text/plain') ?? event.data ?? '';
+      default:
+        return null;
+    }
+  }
+
+  private expandSelectionAroundDefinitionOperator(
+    content: string,
+    selection: TextSelectionOffsets,
+  ): TextSelectionOffsets {
+    const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+
+    if (!definitionOperatorBounds) {
+      return selection;
+    }
+
+    const selectionIntersectsDefinition =
+      selection.start < definitionOperatorBounds.end &&
+      selection.end > definitionOperatorBounds.start;
+    const caretIsInsideDefinition =
+      selection.start === selection.end &&
+      selection.start > definitionOperatorBounds.start &&
+      selection.start < definitionOperatorBounds.end;
+
+    if (!selectionIntersectsDefinition && !caretIsInsideDefinition) {
+      return selection;
+    }
+
+    return {
+      start: Math.min(selection.start, definitionOperatorBounds.start),
+      end: Math.max(selection.end, definitionOperatorBounds.end),
+    };
+  }
+
+  private getDeletionSelection(
+    content: string,
+    selection: TextSelectionOffsets,
+    inputType: string,
+  ): TextSelectionOffsets | null {
+    const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+
+    if (selection.start !== selection.end) {
+      if (
+        definitionOperatorBounds &&
+        (selectionContainsIndex(selection, definitionOperatorBounds.colonIndex) ||
+          selectionContainsIndex(selection, definitionOperatorBounds.equalsIndex))
+      ) {
+        return {
+          start: Math.min(selection.start, definitionOperatorBounds.start),
+          end: Math.max(selection.end, definitionOperatorBounds.end),
+        };
+      }
+
+      if (
+        definitionOperatorBounds &&
+        selection.start >= definitionOperatorBounds.start &&
+        selection.end <= definitionOperatorBounds.end
+      ) {
+        return {
+          start: selection.start,
+          end: selection.start,
+        };
+      }
+
+      return selection;
+    }
+
+    if (inputType === 'deleteContentBackward') {
+      if (selection.start === 0) {
+        return null;
+      }
+
+      const deletedIndex = selection.start - 1;
+
+      if (
+        definitionOperatorBounds &&
+        deletedIndex >= definitionOperatorBounds.start &&
+        deletedIndex < definitionOperatorBounds.end
+      ) {
+        return content[deletedIndex] === ':' || content[deletedIndex] === '='
+          ? {
+              start: definitionOperatorBounds.start,
+              end: definitionOperatorBounds.end,
+            }
+          : selection;
+      }
+
+      return {
+        start: deletedIndex,
+        end: selection.start,
+      };
+    }
+
+    if (inputType === 'deleteContentForward') {
+      if (selection.start >= content.length) {
+        return null;
+      }
+
+      const deletedIndex = selection.start;
+
+      if (
+        definitionOperatorBounds &&
+        deletedIndex >= definitionOperatorBounds.start &&
+        deletedIndex < definitionOperatorBounds.end
+      ) {
+        return content[deletedIndex] === ':' || content[deletedIndex] === '='
+          ? {
+              start: definitionOperatorBounds.start,
+              end: definitionOperatorBounds.end,
+            }
+          : selection;
+      }
+
+      return {
+        start: deletedIndex,
+        end: deletedIndex + 1,
+      };
+    }
+
+    if (inputType === 'deleteByCut' || inputType === 'deleteByDrag') {
+      return selection;
+    }
+
+    return null;
+  }
+
+  private handleMathDefinitionSpaceCommand(region: TextRegion): boolean {
+    const content = getPlainTextContent(region.element.textContent);
+    const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+
+    if (!definitionOperatorBounds) {
+      return false;
+    }
+
+    const selection = this.getSelectionOffsetsWithinElement(region.element);
+
+    if (!selection) {
+      return true;
+    }
+
+    if (
+      selection.start >= definitionOperatorBounds.end &&
+      selection.end > definitionOperatorBounds.end
+    ) {
+      const nextStart = Math.max(
+        definitionOperatorBounds.end,
+        selection.start - 1,
+      );
+
+      this.setSelectionOffsetsWithinElement(
+        region.element,
+        nextStart,
+        selection.end,
+      );
+    }
+
+    return true;
+  }
+
   private handleRegionKeyDown(region: TextRegion, event: KeyboardEvent): void {
     const direction = getRegionNavigationDirection(event);
     const isPlainEnter =
@@ -1089,8 +1528,21 @@ class WorksheetApp {
       !event.altKey &&
       !event.shiftKey &&
       !event.isComposing;
+    const isPlainSpace =
+      event.key === ' ' &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.shiftKey &&
+      !event.isComposing &&
+      (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space');
 
     if (region.kind === 'math') {
+      if (isPlainSpace && this.handleMathDefinitionSpaceCommand(region)) {
+        event.preventDefault();
+        return;
+      }
+
       if (!direction && !isPlainEnter) {
         return;
       }
@@ -1152,7 +1604,7 @@ class WorksheetApp {
       return true;
     }
 
-    const content = region.element.textContent?.replace(/\u00a0/g, ' ').trim();
+    const content = getPlainTextContent(region.element.textContent).trim();
 
     return !content;
   }
@@ -1164,7 +1616,10 @@ class WorksheetApp {
       return;
     }
 
-    if (region.kind === 'math' && contentContainsSpace(region.element.textContent)) {
+    if (
+      region.kind === 'math' &&
+      contentContainsDisallowedMathSpace(region.element.textContent)
+    ) {
       region.kind = 'text';
       this.renderRegions();
     }
@@ -1371,6 +1826,113 @@ class WorksheetApp {
     return {
       baselineOffset,
     };
+  }
+
+  private getSelectionOffsetsWithinElement(
+    element: HTMLElement,
+  ): TextSelectionOffsets | null {
+    const selection = window.getSelection();
+
+    if (
+      !selection ||
+      selection.rangeCount === 0 ||
+      !this.isSelectionWithinElement(selection, element)
+    ) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    const startRange = document.createRange();
+    const endRange = document.createRange();
+
+    startRange.selectNodeContents(element);
+    startRange.setEnd(range.startContainer, range.startOffset);
+    endRange.selectNodeContents(element);
+    endRange.setEnd(range.endContainer, range.endOffset);
+
+    return {
+      start: startRange.toString().length,
+      end: endRange.toString().length,
+    };
+  }
+
+  private resolveTextOffsetPosition(
+    element: HTMLElement,
+    offset: number,
+  ): { node: Node; offset: number } {
+    const contentLength = element.textContent?.length ?? 0;
+    let remaining = Math.min(Math.max(offset, 0), contentLength);
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let currentNode = walker.nextNode();
+    let lastTextNode: Text | null = null;
+
+    while (currentNode) {
+      const textNode = currentNode as Text;
+
+      lastTextNode = textNode;
+
+      if (remaining <= textNode.length) {
+        return {
+          node: textNode,
+          offset: remaining,
+        };
+      }
+
+      remaining -= textNode.length;
+      currentNode = walker.nextNode();
+    }
+
+    if (lastTextNode) {
+      return {
+        node: lastTextNode,
+        offset: lastTextNode.length,
+      };
+    }
+
+    return {
+      node: element,
+      offset: 0,
+    };
+  }
+
+  private setSelectionOffsetsWithinElement(
+    element: HTMLElement,
+    startOffset: number,
+    endOffset: number,
+  ): void {
+    const selection = window.getSelection();
+
+    if (!selection) {
+      return;
+    }
+
+    const contentLength = element.textContent?.length ?? 0;
+    const clampedStart = Math.min(Math.max(startOffset, 0), contentLength);
+    const clampedEnd = Math.min(Math.max(endOffset, clampedStart), contentLength);
+    const startPosition = this.resolveTextOffsetPosition(element, clampedStart);
+    const endPosition = this.resolveTextOffsetPosition(element, clampedEnd);
+    const range = document.createRange();
+
+    range.setStart(startPosition.node, startPosition.offset);
+    range.setEnd(endPosition.node, endPosition.offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  private applyRegionTextContent(
+    region: TextRegion,
+    content: string,
+    caretOffset: number,
+  ): void {
+    region.element.textContent = content;
+
+    if (document.activeElement === region.element) {
+      this.placeCaretAtTextOffset(region.element, caretOffset);
+    }
+  }
+
+  private placeCaretAtTextOffset(element: HTMLElement, offset: number): void {
+    this.setSelectionOffsetsWithinElement(element, offset, offset);
   }
 
   private placeCaretAtEnd(element: HTMLElement): void {

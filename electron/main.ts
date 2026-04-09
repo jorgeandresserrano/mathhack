@@ -8,6 +8,7 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const APP_NAME = 'MathHack';
 const DEFAULT_GRID_SIZE = 20;
 const GRID_SIZE_OPTIONS = [5, 10, 15, 20, 25, 30, 35] as const;
 const GRID_SIZE_CHANGE_CHANNEL = 'worksheet:grid-size-changed';
@@ -21,6 +22,8 @@ type WorksheetTheme = 'light' | 'dark';
 let currentGridSize = DEFAULT_GRID_SIZE;
 let currentTheme: WorksheetTheme = DEFAULT_THEME;
 let mainWindow: BrowserWindow | null = null;
+
+app.setName(APP_NAME);
 
 function broadcastGridSize(gridSize: number): void {
   currentGridSize = gridSize;
@@ -123,6 +126,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    title: APP_NAME,
     backgroundColor: getWindowBackgroundColor(currentTheme),
     webPreferences: {
       devTools: false,
