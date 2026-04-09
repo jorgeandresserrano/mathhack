@@ -1,0 +1,136 @@
+:root {
+  color: #17324c;
+  background: #f7f6ee;
+  --worksheet-paper: #f7f6ee;
+  --grid-line: rgba(161, 191, 234, 0.7);
+  --grid-line-soft: rgba(161, 191, 234, 0.22);
+  --caret-color: #17324c;
+  --selection-window-blue: rgba(78, 134, 255, 0.22);
+  --selection-window-blue-edge: rgba(70, 120, 235, 0.7);
+  --selection-window-green: rgba(77, 163, 109, 0.2);
+  --selection-window-green-edge: rgba(58, 134, 87, 0.72);
+  --region-selection-fill: rgba(78, 134, 255, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--worksheet-paper);
+}
+
+.worksheet {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: text;
+  outline: none;
+  background-color: var(--worksheet-paper);
+  background-image:
+    linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.3),
+      rgba(255, 255, 255, 0.12)
+    ),
+    repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent 8px,
+      var(--grid-line-soft) 8px,
+      var(--grid-line) 9px,
+      rgba(255, 255, 255, 0.26) 10px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 8px,
+      var(--grid-line-soft) 8px,
+      var(--grid-line) 9px,
+      rgba(255, 255, 255, 0.26) 10px
+    );
+  box-shadow: inset 0 0 32px rgba(255, 255, 255, 0.16);
+}
+
+.regions-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.caret {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 10px;
+  background-color: var(--caret-color);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.caret--visible {
+  opacity: 1;
+}
+
+.text-region {
+  position: absolute;
+  min-width: 2px;
+  min-height: 1.35em;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #17324c;
+  font:
+    500 18px/1.35
+    'Avenir Next',
+    'Helvetica Neue',
+    sans-serif;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  z-index: 1;
+}
+
+.text-region--edge-hover {
+  cursor: move;
+}
+
+.text-region--selected {
+  background: var(--region-selection-fill);
+  border-radius: 3px;
+}
+
+.selection-window {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.selection-window--visible {
+  opacity: 1;
+}
+
+.selection-window--window {
+  background: var(--selection-window-blue);
+  box-shadow: inset 0 0 0 1px var(--selection-window-blue-edge);
+}
+
+.selection-window--crossing {
+  background: var(--selection-window-green);
+  box-shadow: inset 0 0 0 1px var(--selection-window-green-edge);
+}
