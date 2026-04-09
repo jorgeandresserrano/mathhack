@@ -10,10 +10,10 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build",
-    "package": "npm run build && node ../../scripts/run-electron-builder.mjs --config electron-builder.yml --publish never",
+    "package": "node ../../scripts/package-desktop-release.mjs",
     "package:dir": "npm run build && node ../../scripts/run-electron-builder.mjs --config electron-builder.yml --dir --publish never",
     "package:mac": "npm run build && node ../../scripts/run-electron-builder.mjs --config electron-builder.yml --mac --publish never",
-    "package:win": "npm run build && node ../../scripts/run-electron-builder.mjs --config electron-builder.yml --win --publish never",
+    "package:win": "npm run build && node ../../scripts/run-electron-builder.mjs --config electron-builder.yml --win --x64 --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "electron dist-electron/main.js"
   }

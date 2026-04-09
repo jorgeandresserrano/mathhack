@@ -75,6 +75,67 @@ type TextSelectionOffsets = {
   end: number;
 };
 
+type DefinitionOperatorBounds = {
+  start: number;
+  colonIndex: number;
+  equalsIndex: number | null;
+  end: number;
+};
+
+type EvaluationOperatorBounds = {
+  start: number;
+  equalsIndex: number;
+  end: number;
+};
+
+type ProtectedMathOperatorBounds =
+  | {
+      kind: 'definition';
+      start: number;
+      end: number;
+      coreIndexes: number[];
+    }
+  | {
+      kind: 'evaluation';
+      start: number;
+      end: number;
+      coreIndexes: number[];
+    };
+
+type MathRegionStatement =
+  | {
+      kind: 'plain';
+    }
+  | {
+      kind: 'definition';
+      target: string;
+      expression: string;
+      operatorBounds: DefinitionOperatorBounds;
+    }
+  | {
+      kind: 'evaluation';
+      expression: string;
+      operatorBounds: EvaluationOperatorBounds;
+    };
+
+type ExpressionToken =
+  | {
+      kind: 'number';
+      value: number;
+    }
+  | {
+      kind: 'identifier';
+      value: string;
+    }
+  | {
+      kind: 'operator';
+      value: '+' | '-' | '*' | '/';
+    }
+  | {
+      kind: 'paren';
+      value: '(' | ')';
+    };
+
 type TextRegion = {
   id: number;
   x: number;
@@ -96,6 +157,7 @@ const DEFAULT_THEME: WorksheetTheme = 'light';
 const DRAG_THRESHOLD = 4;
 const EDGE_HIT_SIZE = 6;
 const CANONICAL_DEFINITION_OPERATOR = ' := ';
+const CANONICAL_EVALUATION_OPERATOR = ' = ';
 const SIMPLE_DEFINITION_TARGET_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 function clampToGrid(value: number, limit: number, gridSize: number): number {
@@ -232,9 +294,13 @@ function selectionContainsIndex(
   return index !== null && selection.start <= index && index < selection.end;
 }
 
+function countOccurrences(content: string, character: string): number {
+  return content.split(character).length - 1;
+}
+
 function getDefinitionOperatorBounds(
   content: string,
-): { start: number; colonIndex: number; equalsIndex: number | null; end: number } | null {
+): DefinitionOperatorBounds | null {
   const colonIndex = content.indexOf(':');
 
   if (colonIndex === -1) {
@@ -271,17 +337,116 @@ function getDefinitionOperatorBounds(
   };
 }
 
-function contentContainsDisallowedMathSpace(content: string | null | undefined): boolean {
+function getEvaluationOperatorBounds(content: string): EvaluationOperatorBounds | null {
+  if (content.includes(':')) {
+    return null;
+  }
+
+  const equalsIndex = content.indexOf('=');
+
+  if (equalsIndex === -1) {
+    return null;
+  }
+
+  let start = equalsIndex;
+
+  while (start > 0 && content[start - 1] === ' ') {
+    start -= 1;
+  }
+
+  let end = equalsIndex + 1;
+
+  while (end < content.length && content[end] === ' ') {
+    end += 1;
+  }
+
+  return {
+    start,
+    equalsIndex,
+    end,
+  };
+}
+
+function getProtectedMathOperatorBounds(content: string): ProtectedMathOperatorBounds | null {
+  const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+
+  if (definitionOperatorBounds) {
+    return {
+      kind: 'definition',
+      start: definitionOperatorBounds.start,
+      end: definitionOperatorBounds.end,
+      coreIndexes:
+        definitionOperatorBounds.equalsIndex === null
+          ? [definitionOperatorBounds.colonIndex]
+          : [definitionOperatorBounds.colonIndex, definitionOperatorBounds.equalsIndex],
+    };
+  }
+
+  const evaluationOperatorBounds = getEvaluationOperatorBounds(content);
+
+  if (!evaluationOperatorBounds) {
+    return null;
+  }
+
+  return {
+    kind: 'evaluation',
+    start: evaluationOperatorBounds.start,
+    end: evaluationOperatorBounds.end,
+    coreIndexes: [evaluationOperatorBounds.equalsIndex],
+  };
+}
+
+function getMathRegionStatement(content: string): MathRegionStatement | null {
   const plainTextContent = getPlainTextContent(content);
   const definitionOperatorBounds = getDefinitionOperatorBounds(plainTextContent);
 
-  if (!definitionOperatorBounds) {
+  if (definitionOperatorBounds) {
+    const target = plainTextContent.slice(0, definitionOperatorBounds.start);
+
+    if (!SIMPLE_DEFINITION_TARGET_PATTERN.test(target)) {
+      return null;
+    }
+
+    return {
+      kind: 'definition',
+      target,
+      expression: plainTextContent.slice(definitionOperatorBounds.end),
+      operatorBounds: definitionOperatorBounds,
+    };
+  }
+
+  const evaluationOperatorBounds = getEvaluationOperatorBounds(plainTextContent);
+
+  if (evaluationOperatorBounds) {
+    const expression = plainTextContent.slice(0, evaluationOperatorBounds.start);
+
+    if (!expression) {
+      return null;
+    }
+
+    return {
+      kind: 'evaluation',
+      expression,
+      operatorBounds: evaluationOperatorBounds,
+    };
+  }
+
+  return {
+    kind: 'plain',
+  };
+}
+
+function contentContainsDisallowedMathSpace(content: string | null | undefined): boolean {
+  const plainTextContent = getPlainTextContent(content);
+  const operatorBounds = getProtectedMathOperatorBounds(plainTextContent);
+
+  if (!operatorBounds) {
     return contentContainsSpace(plainTextContent);
   }
 
   return contentContainsSpace(
-    `${plainTextContent.slice(0, definitionOperatorBounds.start)}${plainTextContent.slice(
-      definitionOperatorBounds.end,
+    `${plainTextContent.slice(0, operatorBounds.start)}${plainTextContent.slice(
+      operatorBounds.end,
     )}`,
   );
 }
@@ -291,7 +456,8 @@ function normalizeMathRegionContent(
   caretOffset: number,
 ): { text: string; caretOffset: number } | null {
   const plainTextContent = getPlainTextContent(content);
-  const definitionCount = plainTextContent.split(':').length - 1;
+  const definitionCount = countOccurrences(plainTextContent, ':');
+  const equalsCount = countOccurrences(plainTextContent, '=');
 
   if (definitionCount > 1) {
     return null;
@@ -303,38 +469,284 @@ function normalizeMathRegionContent(
   );
   const definitionOperatorBounds = getDefinitionOperatorBounds(plainTextContent);
 
-  if (!definitionOperatorBounds) {
+  if (definitionOperatorBounds) {
+    if (equalsCount > 1) {
+      return null;
+    }
+
+    const definitionTarget = plainTextContent.slice(0, definitionOperatorBounds.start);
+
+    if (!SIMPLE_DEFINITION_TARGET_PATTERN.test(definitionTarget)) {
+      return null;
+    }
+
+    const rightHandSide = plainTextContent.slice(definitionOperatorBounds.end);
+    const nextText = `${definitionTarget}${CANONICAL_DEFINITION_OPERATOR}${rightHandSide}`;
+    const rawOperatorLength =
+      definitionOperatorBounds.end - definitionOperatorBounds.start;
+    const nextCaretOffset =
+      clampedCaretOffset <= definitionOperatorBounds.start
+        ? clampedCaretOffset
+        : clampedCaretOffset >= definitionOperatorBounds.end
+          ? clampedCaretOffset - rawOperatorLength + CANONICAL_DEFINITION_OPERATOR.length
+          : definitionOperatorBounds.start +
+            Math.min(
+              clampedCaretOffset - definitionOperatorBounds.start,
+              CANONICAL_DEFINITION_OPERATOR.length,
+            );
+
+    return {
+      text: nextText,
+      caretOffset: Math.min(nextCaretOffset, nextText.length),
+    };
+  }
+
+  if (equalsCount > 1) {
+    return null;
+  }
+
+  const evaluationOperatorBounds = getEvaluationOperatorBounds(plainTextContent);
+
+  if (!evaluationOperatorBounds) {
     return {
       text: plainTextContent,
       caretOffset: clampedCaretOffset,
     };
   }
 
-  const definitionTarget = plainTextContent.slice(0, definitionOperatorBounds.start);
+  const expression = plainTextContent.slice(0, evaluationOperatorBounds.start);
 
-  if (!SIMPLE_DEFINITION_TARGET_PATTERN.test(definitionTarget)) {
+  if (!expression) {
     return null;
   }
 
-  const rightHandSide = plainTextContent.slice(definitionOperatorBounds.end);
-  const nextText = `${definitionTarget}${CANONICAL_DEFINITION_OPERATOR}${rightHandSide}`;
+  const rightHandSide = plainTextContent.slice(evaluationOperatorBounds.end);
+  const nextText = `${expression}${CANONICAL_EVALUATION_OPERATOR}${rightHandSide}`;
   const rawOperatorLength =
-    definitionOperatorBounds.end - definitionOperatorBounds.start;
+    evaluationOperatorBounds.end - evaluationOperatorBounds.start;
   const nextCaretOffset =
-    clampedCaretOffset <= definitionOperatorBounds.start
+    clampedCaretOffset <= evaluationOperatorBounds.start
       ? clampedCaretOffset
-      : clampedCaretOffset >= definitionOperatorBounds.end
-        ? clampedCaretOffset - rawOperatorLength + CANONICAL_DEFINITION_OPERATOR.length
-        : definitionOperatorBounds.start +
+      : clampedCaretOffset >= evaluationOperatorBounds.end
+        ? clampedCaretOffset - rawOperatorLength + CANONICAL_EVALUATION_OPERATOR.length
+        : evaluationOperatorBounds.start +
           Math.min(
-            clampedCaretOffset - definitionOperatorBounds.start,
-            CANONICAL_DEFINITION_OPERATOR.length,
+            clampedCaretOffset - evaluationOperatorBounds.start,
+            CANONICAL_EVALUATION_OPERATOR.length,
           );
 
   return {
     text: nextText,
     caretOffset: Math.min(nextCaretOffset, nextText.length),
   };
+}
+
+function tokenizeMathExpression(expression: string): ExpressionToken[] | null {
+  const tokens: ExpressionToken[] = [];
+  let index = 0;
+
+  while (index < expression.length) {
+    const character = expression[index];
+
+    if (character === ' ') {
+      index += 1;
+      continue;
+    }
+
+    if (/[0-9]/.test(character) || (character === '.' && /[0-9]/.test(expression[index + 1] ?? ''))) {
+      let end = index + 1;
+
+      while (end < expression.length && /[0-9]/.test(expression[end])) {
+        end += 1;
+      }
+
+      if (expression[end] === '.') {
+        end += 1;
+
+        while (end < expression.length && /[0-9]/.test(expression[end])) {
+          end += 1;
+        }
+      }
+
+      const numericValue = Number.parseFloat(expression.slice(index, end));
+
+      if (!Number.isFinite(numericValue)) {
+        return null;
+      }
+
+      tokens.push({
+        kind: 'number',
+        value: numericValue,
+      });
+      index = end;
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(character)) {
+      let end = index + 1;
+
+      while (end < expression.length && /[A-Za-z0-9_]/.test(expression[end])) {
+        end += 1;
+      }
+
+      tokens.push({
+        kind: 'identifier',
+        value: expression.slice(index, end),
+      });
+      index = end;
+      continue;
+    }
+
+    if (character === '+' || character === '-' || character === '*' || character === '/') {
+      tokens.push({
+        kind: 'operator',
+        value: character,
+      });
+      index += 1;
+      continue;
+    }
+
+    if (character === '(' || character === ')') {
+      tokens.push({
+        kind: 'paren',
+        value: character,
+      });
+      index += 1;
+      continue;
+    }
+
+    return null;
+  }
+
+  return tokens;
+}
+
+function evaluateNumericExpression(
+  expression: string,
+  context: Map<string, number>,
+): number | null {
+  const tokens = tokenizeMathExpression(expression);
+
+  if (!tokens) {
+    return null;
+  }
+
+  let index = 0;
+
+  const parseExpression = (): number | null => {
+    let value = parseTerm();
+
+    if (value === null) {
+      return null;
+    }
+
+    while (tokens[index]?.kind === 'operator') {
+      const operator = tokens[index].value;
+
+      if (operator !== '+' && operator !== '-') {
+        break;
+      }
+
+      index += 1;
+      const rightValue = parseTerm();
+
+      if (rightValue === null) {
+        return null;
+      }
+
+      value = operator === '+' ? value + rightValue : value - rightValue;
+    }
+
+    return value;
+  };
+
+  const parseTerm = (): number | null => {
+    let value = parseFactor();
+
+    if (value === null) {
+      return null;
+    }
+
+    while (tokens[index]?.kind === 'operator') {
+      const operator = tokens[index].value;
+
+      if (operator !== '*' && operator !== '/') {
+        break;
+      }
+
+      index += 1;
+      const rightValue = parseFactor();
+
+      if (rightValue === null) {
+        return null;
+      }
+
+      value = operator === '*' ? value * rightValue : value / rightValue;
+    }
+
+    return value;
+  };
+
+  const parseFactor = (): number | null => {
+    const token = tokens[index];
+
+    if (!token) {
+      return null;
+    }
+
+    if (token.kind === 'operator' && (token.value === '+' || token.value === '-')) {
+      index += 1;
+      const value = parseFactor();
+
+      if (value === null) {
+        return null;
+      }
+
+      return token.value === '+' ? value : -value;
+    }
+
+    if (token.kind === 'number') {
+      index += 1;
+      return token.value;
+    }
+
+    if (token.kind === 'identifier') {
+      index += 1;
+      return context.get(token.value) ?? null;
+    }
+
+    if (token.kind === 'paren' && token.value === '(') {
+      index += 1;
+      const value = parseExpression();
+
+      if (value === null || tokens[index]?.kind !== 'paren' || tokens[index].value !== ')') {
+        return null;
+      }
+
+      index += 1;
+      return value;
+    }
+
+    return null;
+  };
+
+  const result = parseExpression();
+
+  if (result === null || index !== tokens.length || !Number.isFinite(result)) {
+    return null;
+  }
+
+  return result;
+}
+
+function formatEvaluatedNumber(value: number): string {
+  const normalizedValue = Math.abs(value) < 1e-12 ? 0 : value;
+
+  if (Number.isInteger(normalizedValue)) {
+    return normalizedValue.toString();
+  }
+
+  return Number.parseFloat(normalizedValue.toPrecision(12)).toString();
 }
 
 function getFinitePositiveMetric(
@@ -631,6 +1043,7 @@ class WorksheetApp {
       }
     }
 
+    this.refreshComputedMathRegions();
     this.renderSelectionWindow();
     this.renderRegions();
     this.renderCaret();
@@ -778,7 +1191,7 @@ class WorksheetApp {
       return;
     }
 
-    if (event.key === ':') {
+    if (event.key === ':' || event.key === '=') {
       event.preventDefault();
       return;
     }
@@ -1142,6 +1555,7 @@ class WorksheetApp {
     }
 
     this.moveDrag = null;
+    this.refreshComputedMathRegions();
     this.renderRegions();
     this.renderCaret();
   }
@@ -1190,6 +1604,7 @@ class WorksheetApp {
       this.activeRegionId = null;
     }
 
+    this.refreshComputedMathRegions();
     this.renderRegions();
     this.renderCaret();
   }
@@ -1219,6 +1634,7 @@ class WorksheetApp {
     this.selectedRegionIds.clear();
     this.activeRegionId = null;
     this.caretPosition = null;
+    this.refreshComputedMathRegions();
     this.renderRegions();
     this.renderCaret();
   }
@@ -1301,7 +1717,86 @@ class WorksheetApp {
     }
 
     this.updateRegionKind(region.id);
+    this.refreshComputedMathRegions();
     region.lastCommittedText = getPlainTextContent(region.element.textContent);
+  }
+
+  private refreshComputedMathRegions(): void {
+    const context = new Map<string, number>();
+
+    for (const region of this.getRegionsInReadingOrder()) {
+      if (region.kind !== 'math') {
+        continue;
+      }
+
+      const statement = getMathRegionStatement(region.element.textContent);
+
+      if (!statement || statement.kind === 'plain') {
+        continue;
+      }
+
+      if (statement.kind === 'definition') {
+        const value = evaluateNumericExpression(statement.expression, context);
+
+        if (value === null) {
+          context.delete(statement.target);
+        } else {
+          context.set(statement.target, value);
+        }
+
+        continue;
+      }
+
+      const value = evaluateNumericExpression(statement.expression, context);
+      const resultText = value === null ? '' : formatEvaluatedNumber(value);
+      const nextText = `${statement.expression}${CANONICAL_EVALUATION_OPERATOR}${resultText}`;
+
+      this.applyComputedEvaluationRegionContent(
+        region,
+        nextText,
+        statement.expression.length + CANONICAL_EVALUATION_OPERATOR.length,
+      );
+    }
+  }
+
+  private applyComputedEvaluationRegionContent(
+    region: TextRegion,
+    content: string,
+    operatorEnd: number,
+  ): void {
+    const currentText = getPlainTextContent(region.element.textContent);
+
+    if (currentText === content) {
+      region.lastCommittedText = content;
+      return;
+    }
+
+    let preservedSelection: TextSelectionOffsets | null = null;
+
+    if (document.activeElement === region.element) {
+      const selection = this.getSelectionOffsetsWithinElement(region.element);
+
+      if (selection) {
+        preservedSelection =
+          selection.end <= operatorEnd
+            ? selection
+            : {
+                start: Math.min(selection.start, operatorEnd),
+                end: Math.min(selection.end, operatorEnd),
+              };
+      }
+    }
+
+    region.element.textContent = content;
+    region.lastCommittedText = content;
+
+    if (preservedSelection) {
+      this.setSelectionOffsetsWithinElement(
+        region.element,
+        preservedSelection.start,
+        preservedSelection.end,
+      );
+    }
   }
 
   private shouldInterceptMathRegionInput(
@@ -1310,7 +1805,12 @@ class WorksheetApp {
   ): boolean {
     const insertedText = this.getInsertedTextForBeforeInput(event);
 
-    return currentText.includes(':') || insertedText?.includes(':') === true;
+    return (
+      currentText.includes(':') ||
+      currentText.includes('=') ||
+      insertedText?.includes(':') === true ||
+      insertedText?.includes('=') === true
+    );
   }
 
   private getNextMathRegionTextEdit(
@@ -1325,7 +1825,7 @@ class WorksheetApp {
         content,
         selection,
       );
-      const adjustedSelection = this.expandSelectionAroundDefinitionOperator(
+      const adjustedSelection = this.expandSelectionAroundMathOperator(
         content,
         selection,
       );
@@ -1371,31 +1871,31 @@ class WorksheetApp {
     }
   }
 
-  private expandSelectionAroundDefinitionOperator(
+  private expandSelectionAroundMathOperator(
     content: string,
     selection: TextSelectionOffsets,
   ): TextSelectionOffsets {
-    const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+    const operatorBounds = getProtectedMathOperatorBounds(content);
 
-    if (!definitionOperatorBounds) {
+    if (!operatorBounds) {
       return selection;
     }
 
     const selectionIntersectsDefinition =
-      selection.start < definitionOperatorBounds.end &&
-      selection.end > definitionOperatorBounds.start;
+      selection.start < operatorBounds.end &&
+      selection.end > operatorBounds.start;
     const caretIsInsideDefinition =
       selection.start === selection.end &&
-      selection.start > definitionOperatorBounds.start &&
-      selection.start < definitionOperatorBounds.end;
+      selection.start > operatorBounds.start &&
+      selection.start < operatorBounds.end;
 
     if (!selectionIntersectsDefinition && !caretIsInsideDefinition) {
       return selection;
     }
 
     return {
-      start: Math.min(selection.start, definitionOperatorBounds.start),
-      end: Math.max(selection.end, definitionOperatorBounds.end),
+      start: Math.min(selection.start, operatorBounds.start),
+      end: Math.max(selection.end, operatorBounds.end),
     };
   }
 
@@ -1404,24 +1904,23 @@ class WorksheetApp {
     selection: TextSelectionOffsets,
     inputType: string,
   ): TextSelectionOffsets | null {
-    const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+    const operatorBounds = getProtectedMathOperatorBounds(content);
 
     if (selection.start !== selection.end) {
       if (
-        definitionOperatorBounds &&
-        (selectionContainsIndex(selection, definitionOperatorBounds.colonIndex) ||
-          selectionContainsIndex(selection, definitionOperatorBounds.equalsIndex))
+        operatorBounds &&
+        operatorBounds.coreIndexes.some((index) => selectionContainsIndex(selection, index))
       ) {
         return {
-          start: Math.min(selection.start, definitionOperatorBounds.start),
-          end: Math.max(selection.end, definitionOperatorBounds.end),
+          start: Math.min(selection.start, operatorBounds.start),
+          end: Math.max(selection.end, operatorBounds.end),
         };
       }
 
       if (
-        definitionOperatorBounds &&
-        selection.start >= definitionOperatorBounds.start &&
-        selection.end <= definitionOperatorBounds.end
+        operatorBounds &&
+        selection.start >= operatorBounds.start &&
+        selection.end <= operatorBounds.end
       ) {
         return {
           start: selection.start,
@@ -1440,14 +1939,14 @@ class WorksheetApp {
       const deletedIndex = selection.start - 1;
 
       if (
-        definitionOperatorBounds &&
-        deletedIndex >= definitionOperatorBounds.start &&
-        deletedIndex < definitionOperatorBounds.end
+        operatorBounds &&
+        deletedIndex >= operatorBounds.start &&
+        deletedIndex < operatorBounds.end
       ) {
-        return content[deletedIndex] === ':' || content[deletedIndex] === '='
+        return operatorBounds.coreIndexes.includes(deletedIndex)
           ? {
-              start: definitionOperatorBounds.start,
-              end: definitionOperatorBounds.end,
+              start: operatorBounds.start,
+              end: operatorBounds.end,
             }
           : selection;
       }
@@ -1466,14 +1965,14 @@ class WorksheetApp {
       const deletedIndex = selection.start;
 
       if (
-        definitionOperatorBounds &&
-        deletedIndex >= definitionOperatorBounds.start &&
-        deletedIndex < definitionOperatorBounds.end
+        operatorBounds &&
+        deletedIndex >= operatorBounds.start &&
+        deletedIndex < operatorBounds.end
       ) {
-        return content[deletedIndex] === ':' || content[deletedIndex] === '='
+        return operatorBounds.coreIndexes.includes(deletedIndex)
           ? {
-              start: definitionOperatorBounds.start,
-              end: definitionOperatorBounds.end,
+              start: operatorBounds.start,
+              end: operatorBounds.end,
             }
           : selection;
       }
@@ -2036,6 +2535,20 @@ class WorksheetApp {
 
   private findRegion(regionId: number): TextRegion | undefined {
     return this.regions.find((region) => region.id === regionId);
+  }
+
+  private getRegionsInReadingOrder(): TextRegion[] {
+    return [...this.regions].sort((leftRegion, rightRegion) => {
+      if (leftRegion.y !== rightRegion.y) {
+        return leftRegion.y - rightRegion.y;
+      }
+
+      if (leftRegion.x !== rightRegion.x) {
+        return leftRegion.x - rightRegion.x;
+      }
+
+      return leftRegion.id - rightRegion.id;
+    });
   }
 
   private isRegionBoundaryVisible(region: TextRegion): boolean {

@@ -161,25 +161,14 @@ function resolvePublishedAt(publishedAt) {
   return parsedDate.toISOString();
 }
 
-async function listFiles(directoryPath) {
+async function listTopLevelFiles(directoryPath) {
   const directoryEntries = await fs.readdir(directoryPath, {
     withFileTypes: true,
   });
 
-  const collectedFiles = [];
-
-  for (const entry of directoryEntries) {
-    const entryPath = path.join(directoryPath, entry.name);
-
-    if (entry.isDirectory()) {
-      collectedFiles.push(...(await listFiles(entryPath)));
-      continue;
-    }
-
-    collectedFiles.push(entryPath);
-  }
-
-  return collectedFiles;
+  return directoryEntries
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(directoryPath, entry.name));
 }
 
 function inferPlatform(filePath) {
@@ -245,7 +234,7 @@ async function collectReleaseArtifacts(artifactDirectories) {
 
   for (const artifactDirectory of artifactDirectories) {
     const absoluteDirectoryPath = path.resolve(artifactDirectory);
-    const filePaths = await listFiles(absoluteDirectoryPath);
+    const filePaths = await listTopLevelFiles(absoluteDirectoryPath);
 
     for (const filePath of filePaths) {
       const extension = path.extname(filePath).toLowerCase();

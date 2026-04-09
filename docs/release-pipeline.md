@@ -8,6 +8,7 @@ This project ships desktop installers from `apps/desktop` and publishes the down
 - Release artifacts are uploaded to Firebase Storage under `releases/<version>/...`.
 - `apps/site/public/releases.json` is generated from the uploaded artifact URLs and then deployed through Firebase Hosting.
 - GitHub Actions builds macOS and Windows installers on native runners so the release flow is not tied to one developer machine.
+- The default local packaging command builds both targets: macOS using the Mac's default architecture and Windows as `x64`.
 
 This is cleaner than mixing binaries into Hosting or trying to cross-build both desktop targets locally.
 
@@ -32,10 +33,16 @@ npm run build
 Package the desktop app for the current macOS machine:
 
 ```sh
+npm run package:desktop
+```
+
+Package only the macOS build:
+
+```sh
 npm run package:desktop:mac
 ```
 
-Package the desktop app for Windows on a Windows runner:
+Package only the Windows `x64` build:
 
 ```sh
 npm run package:desktop:win
@@ -59,6 +66,12 @@ Deploy the site after the manifest has been generated:
 
 ```sh
 npm run release:site
+```
+
+Run the full release flow locally: deploy Storage rules, package macOS and Windows, upload both, regenerate the manifest, and deploy Hosting:
+
+```sh
+npm run release:deploy
 ```
 
 ## GitHub Secrets

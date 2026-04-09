@@ -1,6 +1,6 @@
 {
   "latestVersion": "0.1.0",
-  "publishedAt": "2026-04-09T04:26:23.073Z",
+  "publishedAt": "2026-04-09T04:50:14.634Z",
   "notes": "Desktop downloads are now available for the latest MathHack build.",
   "downloads": {
     "macos": {
@@ -8,6 +8,10 @@
       "size": "107.3 MB",
       "url": "https://firebasestorage.googleapis.com/v0/b/themathhack.firebasestorage.app/o/releases%2F0.1.0%2FMathHack-0.1.0-arm64.dmg?alt=media"
     },
-    "windows": null
+    "windows": {
+      "label": "MathHack Setup 0.1.0.exe",
+      "size": "95.0 MB",
+      "url": "https://firebasestorage.googleapis.com/v0/b/themathhack.firebasestorage.app/o/releases%2F0.1.0%2FMathHack%20Setup%200.1.0.exe?alt=media"
+    }
   }
 }
