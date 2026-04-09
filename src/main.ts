@@ -13,6 +13,7 @@ type Rect = {
 };
 
 type SelectionMode = 'window' | 'crossing';
+type RegionNavigationDirection = 'up' | 'down' | 'left' | 'right';
 
 type DragSelectionState = {
   pointerId: number;
@@ -176,6 +177,80 @@ function getFinitePositiveMetric(
   }
 
   return null;
+}
+
+function getRegionNavigationDirection(
+  event: KeyboardEvent,
+): RegionNavigationDirection | null {
+  if (
+    event.metaKey ||
+    event.ctrlKey ||
+    event.altKey ||
+    event.shiftKey ||
+    event.isComposing
+  ) {
+    return null;
+  }
+
+  switch (event.key) {
+    case 'ArrowUp':
+      return 'up';
+    case 'ArrowDown':
+      return 'down';
+    case 'ArrowLeft':
+      return 'left';
+    case 'ArrowRight':
+      return 'right';
+    default:
+      return null;
+  }
+}
+
+function clampToNearestGrid(value: number, limit: number): number {
+  const snappedValue = Math.round(value / GRID_SIZE) * GRID_SIZE;
+  const maximumGridCoordinate = Math.max(
+    0,
+    Math.floor(Math.max(limit - 1, 0) / GRID_SIZE) * GRID_SIZE,
+  );
+
+  return Math.min(Math.max(snappedValue, 0), maximumGridCoordinate);
+}
+
+function clampToGridLeft(value: number, limit: number): number {
+  const snappedValue = Math.floor((value - 0.001) / GRID_SIZE) * GRID_SIZE;
+  const maximumGridCoordinate = Math.max(
+    0,
+    Math.floor(Math.max(limit - 1, 0) / GRID_SIZE) * GRID_SIZE,
+  );
+
+  return Math.min(Math.max(snappedValue, 0), maximumGridCoordinate);
+}
+
+function clampToGridRight(value: number, limit: number): number {
+  const snappedValue = Math.ceil((value + 0.001) / GRID_SIZE) * GRID_SIZE;
+  const maximumGridCoordinate = Math.max(
+    0,
+    Math.floor(Math.max(limit - 1, 0) / GRID_SIZE) * GRID_SIZE,
+  );
+
+  return Math.min(Math.max(snappedValue, 0), maximumGridCoordinate);
+}
+
+function clampBaselineToNearestGrid(value: number, limit: number): number {
+  const maximumGridCoordinate =
+    Math.floor(Math.max(limit, 0) / GRID_SIZE) * GRID_SIZE;
+
+  if (maximumGridCoordinate <= 0) {
+    return 0;
+  }
+
+  const snappedValue = Math.round(value / GRID_SIZE) * GRID_SIZE;
+
+  return Math.min(Math.max(snappedValue, GRID_SIZE), maximumGridCoordinate);
+}
+
+function clampBaselineBelowGrid(value: number, limit: number): number {
+  return clampBaselineToGrid(value + 0.001, limit);
 }
 
 class WorksheetApp {
@@ -420,12 +495,7 @@ class WorksheetApp {
     });
 
     region.element.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' || event.isComposing || region.kind !== 'math') {
-        return;
-      }
-
-      event.preventDefault();
-      this.exitRegionEditing(region.id);
+      this.handleRegionKeyDown(region, event);
     });
 
     region.element.addEventListener('input', () => {
@@ -686,7 +756,45 @@ class WorksheetApp {
     this.renderCaret();
   }
 
-  private exitRegionEditing(regionId: number): void {
+  private handleRegionKeyDown(region: TextRegion, event: KeyboardEvent): void {
+    const direction = getRegionNavigationDirection(event);
+    const isPlainEnter =
+      event.key === 'Enter' &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.shiftKey &&
+      !event.isComposing;
+
+    if (region.kind === 'math') {
+      if (!direction && !isPlainEnter) {
+        return;
+      }
+
+      event.preventDefault();
+      this.exitRegionEditing(
+        region.id,
+        this.getDirectionalExitCaretPosition(region, direction ?? 'down'),
+      );
+      return;
+    }
+
+    if (!direction) {
+      return;
+    }
+
+    if (this.canNavigateWithinTextRegion(region.element, direction)) {
+      return;
+    }
+
+    event.preventDefault();
+    this.exitRegionEditing(
+      region.id,
+      this.getDirectionalExitCaretPosition(region, direction),
+    );
+  }
+
+  private exitRegionEditing(regionId: number, caretPosition?: Point): void {
     const region = this.findRegion(regionId);
 
     if (!region) {
@@ -695,7 +803,8 @@ class WorksheetApp {
 
     this.pendingRegionExit = {
       regionId,
-      caretPosition: this.getExitCaretPosition(region),
+      caretPosition:
+        caretPosition ?? this.getDirectionalExitCaretPosition(region, 'down'),
     };
     this.clearNativeSelection();
     region.element.blur();
@@ -994,12 +1103,201 @@ class WorksheetApp {
     };
   }
 
-  private getExitCaretPosition(region: TextRegion): Point {
+  private canNavigateWithinTextRegion(
+    element: HTMLElement,
+    direction: RegionNavigationDirection,
+  ): boolean {
+    const selection = window.getSelection();
+
+    if (
+      !selection ||
+      !selection.isCollapsed ||
+      selection.rangeCount === 0 ||
+      !this.isSelectionWithinElement(selection, element)
+    ) {
+      return true;
+    }
+
+    const selectionWithModify = selection as Selection & {
+      modify?: (
+        alter: 'move' | 'extend',
+        direction: 'forward' | 'backward' | 'left' | 'right',
+        granularity:
+          | 'character'
+          | 'word'
+          | 'sentence'
+          | 'line'
+          | 'paragraph'
+          | 'lineboundary'
+          | 'sentenceboundary'
+          | 'paragraphboundary'
+          | 'documentboundary'
+      ) => void;
+    };
+
+    if (typeof selectionWithModify.modify !== 'function') {
+      return true;
+    }
+
+    const originalRange = selection.getRangeAt(0).cloneRange();
+    const originalSnapshot = this.captureSelectionSnapshot(selection);
+    const movement =
+      direction === 'left'
+        ? { direction: 'backward' as const, granularity: 'character' as const }
+        : direction === 'right'
+          ? { direction: 'forward' as const, granularity: 'character' as const }
+          : direction === 'up'
+            ? { direction: 'backward' as const, granularity: 'line' as const }
+            : { direction: 'forward' as const, granularity: 'line' as const };
+
+    selectionWithModify.modify('move', movement.direction, movement.granularity);
+
+    const moved =
+      this.isSelectionWithinElement(selection, element) &&
+      this.didSelectionSnapshotChange(
+        originalSnapshot,
+        this.captureSelectionSnapshot(selection),
+      );
+
+    selection.removeAllRanges();
+    selection.addRange(originalRange);
+
+    return moved;
+  }
+
+  private captureSelectionSnapshot(selection: Selection): {
+    node: Node | null;
+    offset: number;
+    rect: DOMRect | null;
+  } {
+    return {
+      node: selection.focusNode,
+      offset: selection.focusOffset,
+      rect: this.getSelectionCaretRect(selection),
+    };
+  }
+
+  private didSelectionSnapshotChange(
+    before: {
+      node: Node | null;
+      offset: number;
+      rect: DOMRect | null;
+    },
+    after: {
+      node: Node | null;
+      offset: number;
+      rect: DOMRect | null;
+    },
+  ): boolean {
+    if (before.node !== after.node || before.offset !== after.offset) {
+      return true;
+    }
+
+    if (!before.rect || !after.rect) {
+      return false;
+    }
+
+    return (
+      Math.abs(before.rect.left - after.rect.left) > 0.5 ||
+      Math.abs(before.rect.top - after.rect.top) > 0.5
+    );
+  }
+
+  private getSelectionCaretRect(selection: Selection): DOMRect | null {
+    if (selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0).cloneRange();
+
+    range.collapse(selection.isCollapsed);
+
+    const clientRect = range.getClientRects().item(0);
+    const fallbackRect = range.getBoundingClientRect();
+    const rect = clientRect ?? fallbackRect;
+
+    if (
+      !Number.isFinite(rect.left) ||
+      !Number.isFinite(rect.top) ||
+      (!rect.width && !rect.height)
+    ) {
+      return null;
+    }
+
+    return rect;
+  }
+
+  private isSelectionWithinElement(
+    selection: Selection,
+    element: HTMLElement,
+  ): boolean {
+    return (
+      !!selection.anchorNode &&
+      !!selection.focusNode &&
+      element.contains(selection.anchorNode) &&
+      element.contains(selection.focusNode)
+    );
+  }
+
+  private getDirectionalExitCaretPosition(
+    region: TextRegion,
+    direction: RegionNavigationDirection,
+  ): Point {
     const bounds = this.worksheet.getBoundingClientRect();
+    const currentCaretPoint = this.getRegionSelectionAnchorPoint(region);
+
+    switch (direction) {
+      case 'up':
+        return {
+          x: clampToNearestGrid(currentCaretPoint.x, bounds.width),
+          y: clampBaselineToGrid(currentCaretPoint.y - GRID_SIZE, bounds.height),
+        };
+      case 'down':
+        return {
+          x: clampToNearestGrid(currentCaretPoint.x, bounds.width),
+          y: clampBaselineBelowGrid(currentCaretPoint.y, bounds.height),
+        };
+      case 'left':
+        return {
+          x: clampToGridLeft(currentCaretPoint.x, bounds.width),
+          y: clampBaselineToNearestGrid(currentCaretPoint.y, bounds.height),
+        };
+      case 'right':
+        return {
+          x: clampToGridRight(currentCaretPoint.x, bounds.width),
+          y: clampBaselineToNearestGrid(currentCaretPoint.y, bounds.height),
+        };
+    }
+  }
+
+  private getRegionSelectionAnchorPoint(region: TextRegion): Point {
+    const selection = window.getSelection();
+
+    if (selection && this.isSelectionWithinElement(selection, region.element)) {
+      const rect = this.getSelectionCaretRect(selection);
+
+      if (rect) {
+        const worksheetBounds = this.worksheet.getBoundingClientRect();
+
+        return {
+          x: Math.min(
+            Math.max(rect.left - worksheetBounds.left, 0),
+            worksheetBounds.width,
+          ),
+          y: Math.min(
+            Math.max(
+              rect.top - worksheetBounds.top + this.regionTypography.baselineOffset,
+              0,
+            ),
+            worksheetBounds.height,
+          ),
+        };
+      }
+    }
 
     return {
-      x: clampToGrid(region.x, bounds.width),
-      y: clampToGrid(region.y + GRID_SIZE, bounds.height),
+      x: region.x,
+      y: region.y,
     };
   }
 
