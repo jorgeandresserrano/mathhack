@@ -1,4 +1,9 @@
-dist
-dist-electron
 node_modules
 .DS_Store
+.firebase
+firebase-debug.log
+apps/*/dist
+apps/*/dist-electron
+apps/*/release
+dist
+dist-electron

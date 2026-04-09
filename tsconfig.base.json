@@ -12,6 +12,5 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "types": ["node", "vite/client"]
-  },
-  "include": ["electron/**/*.ts", "src/**/*.ts", "vite.config.ts"]
+  }
 }

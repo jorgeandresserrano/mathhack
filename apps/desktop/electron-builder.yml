@@ -1,0 +1,22 @@
+appId: com.jorgeandresserrano.mathhack
+productName: MathHack
+electronVersion: 41.2.0
+asar: true
+directories:
+  output: release
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+mac:
+  category: public.app-category.education
+  target:
+    - dmg
+    - zip
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
