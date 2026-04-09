@@ -1095,6 +1095,13 @@ class WorksheetApp {
         return;
       }
 
+      if (
+        (direction === 'left' || direction === 'right') &&
+        this.canNavigateWithinRegion(region.element, direction)
+      ) {
+        return;
+      }
+
       event.preventDefault();
       this.exitRegionEditing(
         region.id,
@@ -1111,7 +1118,7 @@ class WorksheetApp {
       return;
     }
 
-    if (this.canNavigateWithinTextRegion(region.element, direction)) {
+    if (this.canNavigateWithinRegion(region.element, direction)) {
       return;
     }
 
@@ -1574,7 +1581,7 @@ class WorksheetApp {
     };
   }
 
-  private canNavigateWithinTextRegion(
+  private canNavigateWithinRegion(
     element: HTMLElement,
     direction: RegionNavigationDirection,
   ): boolean {
@@ -1715,6 +1722,11 @@ class WorksheetApp {
     direction: RegionNavigationDirection,
   ): Point {
     const bounds = this.worksheet.getBoundingClientRect();
+
+    if (region.kind === 'math') {
+      return this.getBlockDirectionalExitCaretPosition(region, direction, bounds);
+    }
+
     const currentCaretPoint = this.getRegionSelectionAnchorPoint(region);
 
     switch (direction) {
@@ -1728,8 +1740,57 @@ class WorksheetApp {
           ),
         };
       case 'down':
-        if (region.kind === 'text') {
+        return this.getBlockDirectionalExitCaretPosition(region, direction, bounds);
+
+      case 'left':
+        return {
+          x: clampToGridLeft(currentCaretPoint.x, bounds.width, this.gridSize),
+          y: clampBaselineToNearestGrid(
+            currentCaretPoint.y,
+            bounds.height,
+            this.gridSize,
+          ),
+        };
+      case 'right':
+        {
           const regionRect = this.getRegionRect(region);
+          const exitX = clampToGridRight(
+            regionRect.x + regionRect.width,
+            bounds.width,
+            this.gridSize,
+          );
+
+        return {
+          x: exitX,
+          y: clampBaselineToNearestGrid(
+            region.y,
+            bounds.height,
+            this.gridSize,
+          ),
+        };
+        }
+    }
+  }
+
+  private getBlockDirectionalExitCaretPosition(
+    region: TextRegion,
+    direction: RegionNavigationDirection,
+    bounds: DOMRect,
+  ): Point {
+    const regionRect = this.getRegionRect(region);
+
+    switch (direction) {
+      case 'up':
+        return {
+          x: clampToNearestGrid(region.x, bounds.width, this.gridSize),
+          y: clampBaselineToGrid(
+            regionRect.y - this.gridSize,
+            bounds.height,
+            this.gridSize,
+          ),
+        };
+      case 'down':
+        {
           const exitTop = clampToGridRight(
             regionRect.y + regionRect.height,
             bounds.height,
@@ -1745,49 +1806,28 @@ class WorksheetApp {
             ),
           };
         }
-
-        return {
-          x: clampToNearestGrid(currentCaretPoint.x, bounds.width, this.gridSize),
-          y: clampBaselineBelowGrid(
-            currentCaretPoint.y,
-            bounds.height,
-            this.gridSize,
-          ),
-        };
       case 'left':
         return {
-          x: clampToGridLeft(currentCaretPoint.x, bounds.width, this.gridSize),
+          x: clampToGridLeft(regionRect.x, bounds.width, this.gridSize),
           y: clampBaselineToNearestGrid(
-            currentCaretPoint.y,
+            region.y,
             bounds.height,
             this.gridSize,
           ),
         };
       case 'right':
-        {
-          const regionRect = this.getRegionRect(region);
-          const exitX =
-            region.kind === 'text'
-              ? clampToGridRight(
-                  regionRect.x + regionRect.width,
-                  bounds.width,
-                  this.gridSize,
-                )
-              : clampToGridRight(
-                  currentCaretPoint.x,
-                  bounds.width,
-                  this.gridSize,
-                );
-
         return {
-          x: exitX,
+          x: clampToGridRight(
+            regionRect.x + regionRect.width,
+            bounds.width,
+            this.gridSize,
+          ),
           y: clampBaselineToNearestGrid(
-            region.kind === 'text' ? region.y : currentCaretPoint.y,
+            region.y,
             bounds.height,
             this.gridSize,
           ),
         };
-        }
     }
   }
 
