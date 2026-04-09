@@ -93,6 +93,15 @@ function isPrintableKey(event: KeyboardEvent): boolean {
   );
 }
 
+function isSelectAllShortcut(event: KeyboardEvent): boolean {
+  return (
+    event.key.toLowerCase() === 'a' &&
+    event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  );
+}
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -165,6 +174,7 @@ class WorksheetApp {
     const point = this.getLocalPoint(event);
 
     this.blurActiveRegion();
+    this.clearNativeSelection();
     this.worksheet.focus();
     this.dragSelection = {
       pointerId: event.pointerId,
@@ -243,6 +253,12 @@ class WorksheetApp {
   };
 
   private readonly handleWindowKeyDown = (event: KeyboardEvent): void => {
+    if (isSelectAllShortcut(event) && !isEditableTarget(event.target)) {
+      event.preventDefault();
+      this.selectAllRegions();
+      return;
+    }
+
     if (!isPrintableKey(event) || isEditableTarget(event.target)) {
       return;
     }
@@ -361,6 +377,16 @@ class WorksheetApp {
     if (options.placeCaretAtEnd) {
       this.placeCaretAtEnd(region.element);
     }
+  }
+
+  private selectAllRegions(): void {
+    this.blurActiveRegion();
+    this.clearNativeSelection();
+    this.selectedRegionIds = new Set(this.regions.map((region) => region.id));
+    this.activeRegionId = null;
+    this.caretPosition = null;
+    this.renderRegions();
+    this.renderCaret();
   }
 
   private applyDragSelection(): void {
@@ -610,6 +636,10 @@ class WorksheetApp {
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
+
+  private clearNativeSelection(): void {
+    window.getSelection()?.removeAllRanges();
   }
 
   private blurActiveRegion(): void {
