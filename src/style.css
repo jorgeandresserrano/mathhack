@@ -10,6 +10,8 @@
   --selection-window-green: rgba(77, 163, 109, 0.2);
   --selection-window-green-edge: rgba(58, 134, 87, 0.72);
   --region-selection-fill: rgba(78, 134, 255, 0.12);
+  --math-region-color: #2f67d8;
+  --text-region-color: #17324c;
 }
 
 * {
@@ -91,7 +93,6 @@ body {
   border: 0;
   outline: none;
   background: transparent;
-  color: #17324c;
   font:
     500 18px/1.35
     'Avenir Next',
@@ -100,6 +101,14 @@ body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   z-index: 1;
+}
+
+.text-region--math {
+  color: var(--math-region-color);
+}
+
+.text-region--text {
+  color: var(--text-region-color);
 }
 
 .text-region--edge-hover {

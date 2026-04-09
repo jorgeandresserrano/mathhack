@@ -32,16 +32,24 @@ type MoveDragState = {
   hasMoved: boolean;
 };
 
+type RegionKind = 'math' | 'text';
+
 type TextRegion = {
   id: number;
   x: number;
   y: number;
+  kind: RegionKind;
   element: HTMLDivElement;
+};
+
+type RegionTypographyMetrics = {
+  baselineOffset: number;
 };
 
 const GRID_SIZE = 10;
 const DRAG_THRESHOLD = 4;
 const EDGE_HIT_SIZE = 6;
+const CARET_VISUAL_HEIGHT = GRID_SIZE;
 
 function clampToGrid(value: number, limit: number): number {
   const snappedValue = Math.floor(value / GRID_SIZE) * GRID_SIZE;
@@ -51,6 +59,22 @@ function clampToGrid(value: number, limit: number): number {
   );
 
   return Math.min(Math.max(snappedValue, 0), maximumGridCoordinate);
+}
+
+function clampBaselineToGrid(value: number, limit: number): number {
+  const maximumGridCoordinate =
+    Math.floor(Math.max(limit, 0) / GRID_SIZE) * GRID_SIZE;
+
+  if (maximumGridCoordinate <= 0) {
+    return 0;
+  }
+
+  const snappedValue = Math.max(
+    GRID_SIZE,
+    Math.ceil(value / GRID_SIZE) * GRID_SIZE,
+  );
+
+  return Math.min(snappedValue, maximumGridCoordinate);
 }
 
 function normalizeRect(a: Point, b: Point): Rect {
@@ -102,6 +126,30 @@ function isSelectAllShortcut(event: KeyboardEvent): boolean {
   );
 }
 
+function isDeleteSelectionKey(event: KeyboardEvent): boolean {
+  return event.key === 'Backspace' || event.key === 'Delete';
+}
+
+function getCaretMoveDelta(event: KeyboardEvent): Point | null {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) {
+    return null;
+  }
+
+  switch (event.key) {
+    case 'ArrowLeft':
+      return { x: -GRID_SIZE, y: 0 };
+    case 'ArrowRight':
+      return { x: GRID_SIZE, y: 0 };
+    case 'ArrowUp':
+      return { x: 0, y: -GRID_SIZE };
+    case 'ArrowDown':
+    case 'Enter':
+      return { x: 0, y: GRID_SIZE };
+    default:
+      return null;
+  }
+}
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -114,17 +162,40 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+function contentContainsSpace(content: string | null | undefined): boolean {
+  return /[ \u00a0]/.test(content ?? '');
+}
+
+function getFinitePositiveMetric(
+  ...values: Array<number | undefined>
+): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 class WorksheetApp {
   private readonly worksheet: HTMLElement;
   private readonly regionsLayer: HTMLElement;
   private readonly caret: HTMLElement;
   private readonly selectionWindow: HTMLElement;
+  private readonly regionTypography: RegionTypographyMetrics;
   private readonly regions: TextRegion[] = [];
   private caretPosition: Point | null = null;
   private selectedRegionIds = new Set<number>();
   private activeRegionId: number | null = null;
   private dragSelection: DragSelectionState | null = null;
   private moveDrag: MoveDragState | null = null;
+  private pendingRegionExit:
+    | {
+        regionId: number;
+        caretPosition: Point;
+      }
+    | null = null;
   private nextRegionId = 1;
 
   constructor(root: HTMLDivElement) {
@@ -149,6 +220,7 @@ class WorksheetApp {
     this.regionsLayer = regionsLayer;
     this.caret = caret;
     this.selectionWindow = selectionWindow;
+    this.regionTypography = this.measureRegionTypography();
 
     this.bindEvents();
     this.renderCaret();
@@ -259,6 +331,32 @@ class WorksheetApp {
       return;
     }
 
+    if (
+      isDeleteSelectionKey(event) &&
+      !isEditableTarget(event.target) &&
+      this.selectedRegionIds.size > 0
+    ) {
+      event.preventDefault();
+      this.deleteSelectedRegions();
+      return;
+    }
+
+    const caretMoveDelta = isEditableTarget(event.target)
+      ? null
+      : getCaretMoveDelta(event);
+
+    if (caretMoveDelta && this.selectedRegionIds.size > 0) {
+      event.preventDefault();
+      this.moveSelectedRegions(caretMoveDelta);
+      return;
+    }
+
+    if (caretMoveDelta && this.caretPosition) {
+      event.preventDefault();
+      this.moveCaret(caretMoveDelta);
+      return;
+    }
+
     if (!isPrintableKey(event) || isEditableTarget(event.target)) {
       return;
     }
@@ -280,6 +378,7 @@ class WorksheetApp {
       id: this.nextRegionId,
       x: position.x,
       y: position.y,
+      kind: contentContainsSpace(initialText) ? 'text' : 'math',
       element,
     };
 
@@ -320,6 +419,19 @@ class WorksheetApp {
       this.activateRegion(region.id);
     });
 
+    region.element.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.isComposing || region.kind !== 'math') {
+        return;
+      }
+
+      event.preventDefault();
+      this.exitRegionEditing(region.id);
+    });
+
+    region.element.addEventListener('input', () => {
+      this.updateRegionKind(region.id);
+    });
+
     region.element.addEventListener('pointermove', (event) => {
       const shouldShowMoveCursor =
         this.selectedRegionIds.has(region.id) &&
@@ -345,9 +457,12 @@ class WorksheetApp {
 
         if (this.isRegionEmpty(region.id)) {
           this.removeRegion(region.id);
+          this.applyPendingRegionExit(region.id);
           return;
         }
 
+        this.updateRegionKind(region.id);
+        this.applyPendingRegionExit(region.id);
         this.renderRegions();
         this.renderCaret();
       });
@@ -474,25 +589,10 @@ class WorksheetApp {
 
     this.moveDrag.hasMoved = true;
 
-    const worksheetBounds = this.worksheet.getBoundingClientRect();
-    const maxGroupX = Math.max(
-      0,
-      worksheetBounds.width - this.moveDrag.selectionBounds.width,
-    );
-    const maxGroupY = Math.max(
-      0,
-      worksheetBounds.height - this.moveDrag.selectionBounds.height,
-    );
-    const nextGroupX = clampToGrid(
-      this.moveDrag.selectionBounds.x + deltaX,
-      maxGroupX + 1,
-    );
-    const nextGroupY = clampToGrid(
-      this.moveDrag.selectionBounds.y + deltaY,
-      maxGroupY + 1,
-    );
-    const offsetX = nextGroupX - this.moveDrag.selectionBounds.x;
-    const offsetY = nextGroupY - this.moveDrag.selectionBounds.y;
+    const offset = this.getClampedRegionGroupOffset(this.moveDrag.selectionBounds, {
+      x: deltaX,
+      y: deltaY,
+    });
 
     for (const regionId of this.moveDrag.regionIds) {
       const region = this.findRegion(regionId);
@@ -503,8 +603,8 @@ class WorksheetApp {
       }
 
       this.setRegionPosition(region, {
-        x: startPosition.x + offsetX,
-        y: startPosition.y + offsetY,
+        x: startPosition.x + offset.x,
+        y: startPosition.y + offset.y,
       });
     }
   }
@@ -557,6 +657,50 @@ class WorksheetApp {
     this.renderCaret();
   }
 
+  private deleteSelectedRegions(): void {
+    const regionIds = [...this.selectedRegionIds];
+
+    if (regionIds.length === 0) {
+      return;
+    }
+
+    this.blurActiveRegion();
+    this.clearNativeSelection();
+
+    for (const regionId of regionIds) {
+      const regionIndex = this.regions.findIndex((region) => region.id === regionId);
+
+      if (regionIndex === -1) {
+        continue;
+      }
+
+      const [region] = this.regions.splice(regionIndex, 1);
+
+      region.element.remove();
+    }
+
+    this.selectedRegionIds.clear();
+    this.activeRegionId = null;
+    this.caretPosition = null;
+    this.renderRegions();
+    this.renderCaret();
+  }
+
+  private exitRegionEditing(regionId: number): void {
+    const region = this.findRegion(regionId);
+
+    if (!region) {
+      return;
+    }
+
+    this.pendingRegionExit = {
+      regionId,
+      caretPosition: this.getExitCaretPosition(region),
+    };
+    this.clearNativeSelection();
+    region.element.blur();
+  }
+
   private isRegionEmpty(regionId: number): boolean {
     const region = this.findRegion(regionId);
 
@@ -569,6 +713,31 @@ class WorksheetApp {
     return !content;
   }
 
+  private updateRegionKind(regionId: number): void {
+    const region = this.findRegion(regionId);
+
+    if (!region) {
+      return;
+    }
+
+    if (region.kind === 'math' && contentContainsSpace(region.element.textContent)) {
+      region.kind = 'text';
+      this.renderRegions();
+    }
+  }
+
+  private applyPendingRegionExit(regionId: number): void {
+    if (this.pendingRegionExit?.regionId !== regionId) {
+      return;
+    }
+
+    this.selectedRegionIds.clear();
+    this.activeRegionId = null;
+    this.caretPosition = this.pendingRegionExit.caretPosition;
+    this.pendingRegionExit = null;
+    this.clearNativeSelection();
+  }
+
   private renderRegions(): void {
     for (const region of this.regions) {
       const isActive = region.id === this.activeRegionId;
@@ -576,6 +745,8 @@ class WorksheetApp {
 
       region.element.classList.toggle('text-region--active', isActive);
       region.element.classList.toggle('text-region--selected', isSelected);
+      region.element.classList.toggle('text-region--math', region.kind === 'math');
+      region.element.classList.toggle('text-region--text', region.kind === 'text');
 
       if (!this.selectedRegionIds.has(region.id)) {
         region.element.classList.remove('text-region--edge-hover');
@@ -589,8 +760,51 @@ class WorksheetApp {
       return;
     }
 
-    this.caret.style.transform = `translate(${this.caretPosition.x}px, ${this.caretPosition.y}px)`;
+    this.caret.style.transform = `translate(${this.caretPosition.x}px, ${this.caretPosition.y - CARET_VISUAL_HEIGHT}px)`;
     this.caret.classList.add('caret--visible');
+  }
+
+  private moveCaret(delta: Point): void {
+    if (!this.caretPosition) {
+      return;
+    }
+
+    const bounds = this.worksheet.getBoundingClientRect();
+
+    this.caretPosition = {
+      x: clampToGrid(this.caretPosition.x + delta.x, bounds.width),
+      y: clampBaselineToGrid(this.caretPosition.y + delta.y, bounds.height),
+    };
+    this.renderCaret();
+  }
+
+  private moveSelectedRegions(delta: Point): void {
+    const selectedRegions = this.getSelectedRegions();
+
+    if (selectedRegions.length === 0) {
+      return;
+    }
+
+    const selectionBounds = this.getCombinedRegionBounds(selectedRegions);
+    const offset = this.getClampedRegionGroupOffset(selectionBounds, delta);
+
+    if (offset.x === 0 && offset.y === 0) {
+      return;
+    }
+
+    this.blurActiveRegion();
+    this.clearNativeSelection();
+    this.caretPosition = null;
+
+    for (const region of selectedRegions) {
+      this.setRegionPosition(region, {
+        x: region.x + offset.x,
+        y: region.y + offset.y,
+      });
+    }
+
+    this.renderRegions();
+    this.renderCaret();
   }
 
   private renderSelectionWindow(): void {
@@ -621,6 +835,69 @@ class WorksheetApp {
       'selection-window--crossing',
       this.dragSelection.mode === 'crossing',
     );
+  }
+
+  private measureRegionTypography(): RegionTypographyMetrics {
+    const probe = document.createElement('div');
+
+    probe.className = 'text-region';
+    probe.textContent = 'Hg';
+    probe.style.visibility = 'hidden';
+    probe.style.pointerEvents = 'none';
+    this.regionsLayer.append(probe);
+
+    const styles = window.getComputedStyle(probe);
+    const computedLineHeight = Number.parseFloat(styles.lineHeight);
+    const measuredHeight = probe.getBoundingClientRect().height;
+    const fontSize = Number.parseFloat(styles.fontSize);
+    const lineHeight =
+      getFinitePositiveMetric(computedLineHeight, measuredHeight, fontSize) ??
+      GRID_SIZE;
+
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    let baselineOffset = lineHeight;
+
+    if (context) {
+      context.font = [
+        styles.fontStyle,
+        styles.fontVariant,
+        styles.fontWeight,
+        styles.fontSize,
+        styles.fontFamily,
+      ].join(' ');
+
+      const metrics = context.measureText('Hg') as TextMetrics & {
+        emHeightAscent?: number;
+        emHeightDescent?: number;
+        fontBoundingBoxAscent?: number;
+        fontBoundingBoxDescent?: number;
+      };
+      const ascent = getFinitePositiveMetric(
+        metrics.emHeightAscent,
+        metrics.fontBoundingBoxAscent,
+        metrics.actualBoundingBoxAscent,
+      );
+      const descent =
+        getFinitePositiveMetric(
+          metrics.emHeightDescent,
+          metrics.fontBoundingBoxDescent,
+          metrics.actualBoundingBoxDescent,
+        ) ?? 0;
+
+      if (ascent !== null) {
+        const glyphHeight = ascent + descent;
+        const extraLeading = Math.max(lineHeight - glyphHeight, 0);
+
+        baselineOffset = extraLeading / 2 + ascent;
+      }
+    }
+
+    probe.remove();
+
+    return {
+      baselineOffset,
+    };
   }
 
   private placeCaretAtEnd(element: HTMLElement): void {
@@ -666,7 +943,7 @@ class WorksheetApp {
 
     return {
       x: clampToGrid(point.x, bounds.width),
-      y: clampToGrid(point.y, bounds.height),
+      y: clampBaselineToGrid(point.y, bounds.height),
     };
   }
 
@@ -701,6 +978,31 @@ class WorksheetApp {
     };
   }
 
+  private getClampedRegionGroupOffset(
+    selectionBounds: Rect,
+    delta: Point,
+  ): Point {
+    const worksheetBounds = this.worksheet.getBoundingClientRect();
+    const maxGroupX = Math.max(0, worksheetBounds.width - selectionBounds.width);
+    const maxGroupY = Math.max(0, worksheetBounds.height - selectionBounds.height);
+    const nextGroupX = clampToGrid(selectionBounds.x + delta.x, maxGroupX + 1);
+    const nextGroupY = clampToGrid(selectionBounds.y + delta.y, maxGroupY + 1);
+
+    return {
+      x: nextGroupX - selectionBounds.x,
+      y: nextGroupY - selectionBounds.y,
+    };
+  }
+
+  private getExitCaretPosition(region: TextRegion): Point {
+    const bounds = this.worksheet.getBoundingClientRect();
+
+    return {
+      x: clampToGrid(region.x, bounds.width),
+      y: clampToGrid(region.y + GRID_SIZE, bounds.height),
+    };
+  }
+
   private isPointerOnRegionEdge(
     region: TextRegion,
     event: PointerEvent,
@@ -723,13 +1025,13 @@ class WorksheetApp {
     region.x = position.x;
     region.y = position.y;
     region.element.style.left = `${position.x}px`;
-    region.element.style.top = `${position.y}px`;
+    region.element.style.top = `${position.y - this.regionTypography.baselineOffset}px`;
   }
 
   private getRegionRect(region: TextRegion): Rect {
     return {
-      x: region.x,
-      y: region.y,
+      x: region.element.offsetLeft,
+      y: region.element.offsetTop,
       width: region.element.offsetWidth,
       height: region.element.offsetHeight,
     };
