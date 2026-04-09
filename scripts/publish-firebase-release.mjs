@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { createRequire } from 'node:module';
 import { Storage } from '@google-cloud/storage';
 
 const DEFAULT_ARTIFACT_DIRECTORY = 'apps/desktop/release';
@@ -34,6 +36,15 @@ const CONTENT_TYPES = new Map([
   ['.yml', 'application/yaml'],
   ['.zip', 'application/zip'],
 ]);
+const FIREBASE_CONFIGSTORE_PATH = path.join(
+  os.homedir(),
+  '.config',
+  'configstore',
+  'firebase-tools.json',
+);
+const GOOGLE_OAUTH_TOKEN_URL = 'https://www.googleapis.com/oauth2/v3/token';
+const require = createRequire(import.meta.url);
+const firebaseApiModule = require('firebase-tools/lib/api.js');
 
 function parseArguments(argv) {
   const options = {
@@ -91,6 +102,15 @@ function parseArguments(argv) {
 async function readJson(filePath) {
   const rawContent = await fs.readFile(filePath, 'utf8');
   return JSON.parse(rawContent);
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readProjectId() {
@@ -303,6 +323,148 @@ async function uploadArtifacts(storage, bucketName, version, artifacts) {
   return uploadedArtifacts;
 }
 
+async function readFirebaseCliTokens() {
+  if (!(await fileExists(FIREBASE_CONFIGSTORE_PATH))) {
+    return null;
+  }
+
+  const config = await readJson(FIREBASE_CONFIGSTORE_PATH);
+  return config.tokens ?? null;
+}
+
+async function getFirebaseCliAccessToken() {
+  const tokens = await readFirebaseCliTokens();
+
+  if (!tokens?.refresh_token) {
+    throw new Error(
+      'No Firebase CLI refresh token found. Run `firebase login` or provide GOOGLE_APPLICATION_CREDENTIALS.',
+    );
+  }
+
+  if (
+    typeof tokens.access_token === 'string' &&
+    typeof tokens.expires_at === 'number' &&
+    tokens.expires_at > Date.now() + 60_000
+  ) {
+    return tokens.access_token;
+  }
+
+  const body = new URLSearchParams({
+    refresh_token: tokens.refresh_token,
+    client_id: firebaseApiModule.clientId(),
+    client_secret: firebaseApiModule.clientSecret(),
+    grant_type: 'refresh_token',
+  });
+
+  const response = await fetch(GOOGLE_OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to refresh Firebase CLI access token: ${response.status}`);
+  }
+
+  const refreshedTokens = await response.json();
+
+  if (typeof refreshedTokens.access_token !== 'string') {
+    throw new Error('Firebase CLI token refresh did not return an access token.');
+  }
+
+  return refreshedTokens.access_token;
+}
+
+async function uploadObjectWithAccessToken(
+  bucketName,
+  destinationPath,
+  content,
+  contentType,
+  accessToken,
+  metadata = {},
+) {
+  const uploadUrl = new URL(
+    `https://storage.googleapis.com/upload/storage/v1/b/${bucketName}/o`,
+  );
+  uploadUrl.searchParams.set('uploadType', 'media');
+  uploadUrl.searchParams.set('name', destinationPath);
+
+  const uploadResponse = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': contentType,
+    },
+    body: content,
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error(
+      `Failed to upload ${destinationPath} to Firebase Storage: ${uploadResponse.status}`,
+    );
+  }
+
+  const metadataUrl = new URL(
+    `https://storage.googleapis.com/storage/v1/b/${bucketName}/o/${encodeURIComponent(
+      destinationPath,
+    )}`,
+  );
+  const metadataResponse = await fetch(metadataUrl, {
+    method: 'PATCH',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(metadata),
+  });
+
+  if (!metadataResponse.ok) {
+    throw new Error(
+      `Failed to update metadata for ${destinationPath}: ${metadataResponse.status}`,
+    );
+  }
+}
+
+async function uploadArtifactsWithFirebaseCli(
+  bucketName,
+  version,
+  artifacts,
+) {
+  const accessToken = await getFirebaseCliAccessToken();
+  const uploadedArtifacts = [];
+
+  for (const artifact of artifacts) {
+    const destinationPath = path.posix.join(
+      'releases',
+      version,
+      artifact.fileName,
+    );
+    await uploadObjectWithAccessToken(
+      bucketName,
+      destinationPath,
+      await fs.readFile(artifact.filePath),
+      getContentType(artifact.filePath),
+      accessToken,
+      {
+        cacheControl: 'public,max-age=31536000,immutable',
+        metadata: {
+          sha256: artifact.sha256,
+        },
+      },
+    );
+
+    uploadedArtifacts.push({
+      ...artifact,
+      destinationPath,
+      url: toFirebaseDownloadUrl(bucketName, destinationPath),
+    });
+  }
+
+  return uploadedArtifacts;
+}
+
 function buildDryRunArtifacts(bucketName, version, artifacts) {
   return artifacts.map((artifact) => {
     const destinationPath = path.posix.join(
@@ -398,6 +560,28 @@ async function uploadStorageManifest(storage, bucketName, manifest, version) {
   }
 }
 
+async function uploadStorageManifestWithFirebaseCli(bucketName, manifest, version) {
+  const accessToken = await getFirebaseCliAccessToken();
+  const manifestBody = `${JSON.stringify(manifest, null, 2)}\n`;
+  const manifestDestinations = [
+    path.posix.join('releases', 'releases.json'),
+    path.posix.join('releases', version, 'releases.json'),
+  ];
+
+  for (const destination of manifestDestinations) {
+    await uploadObjectWithAccessToken(
+      bucketName,
+      destination,
+      manifestBody,
+      'application/json; charset=utf-8',
+      accessToken,
+      {
+        cacheControl: 'no-store',
+      },
+    );
+  }
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   const projectId = await readProjectId();
@@ -406,16 +590,21 @@ async function main() {
   const publishedAt = resolvePublishedAt(options.publishedAt);
   const bucketName = options.bucket || `${projectId}.firebasestorage.app`;
   const artifacts = await collectReleaseArtifacts(options.artifactDirectories);
+  const shouldUseApplicationDefaultCredentials = Boolean(
+    process.env.GOOGLE_APPLICATION_CREDENTIALS,
+  );
   const uploadedArtifacts = options.dryRun
     ? buildDryRunArtifacts(bucketName, version, artifacts)
-    : await uploadArtifacts(
-        new Storage({
-          projectId,
-        }),
-        bucketName,
-        version,
-        artifacts,
-      );
+    : shouldUseApplicationDefaultCredentials
+      ? await uploadArtifacts(
+          new Storage({
+            projectId,
+          }),
+          bucketName,
+          version,
+          artifacts,
+        )
+      : await uploadArtifactsWithFirebaseCli(bucketName, version, artifacts);
   const manifest = buildManifest(version, publishedAt, notes, uploadedArtifacts);
 
   if (options.dryRun) {
@@ -430,12 +619,19 @@ async function main() {
     return;
   }
 
-  const storage = new Storage({
-    projectId,
-  });
-
   await writeSiteManifest(manifest);
-  await uploadStorageManifest(storage, bucketName, manifest, version);
+  if (shouldUseApplicationDefaultCredentials) {
+    await uploadStorageManifest(
+      new Storage({
+        projectId,
+      }),
+      bucketName,
+      manifest,
+      version,
+    );
+  } else {
+    await uploadStorageManifestWithFirebaseCli(bucketName, manifest, version);
+  }
 
   process.stdout.write(
     `Published ${uploadedArtifacts.length} files to gs://${bucketName}/releases/${version}\n`,

@@ -34,7 +34,7 @@ function broadcastGridSize(gridSize: number): void {
 }
 
 function getWindowBackgroundColor(theme: WorksheetTheme): string {
-  return theme === 'dark' ? '#16191f' : '#f7f6ee';
+  return theme === 'dark' ? '#696969' : '#f7f6ee';
 }
 
 function broadcastTheme(theme: WorksheetTheme): void {
