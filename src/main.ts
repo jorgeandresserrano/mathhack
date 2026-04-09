@@ -1321,15 +1321,20 @@ class WorksheetApp {
     const insertedText = this.getInsertedTextForBeforeInput(event);
 
     if (insertedText !== null) {
+      const redirectedSelection = this.getMathDefinitionInsertionSelection(
+        content,
+        selection,
+      );
       const adjustedSelection = this.expandSelectionAroundDefinitionOperator(
         content,
         selection,
       );
+      const editSelection = redirectedSelection ?? adjustedSelection;
 
       return (
         normalizeMathRegionContent(
-          replaceTextRange(content, adjustedSelection, insertedText),
-          adjustedSelection.start + insertedText.length,
+          replaceTextRange(content, editSelection, insertedText),
+          editSelection.start + insertedText.length,
         ) ?? false
       );
     }
@@ -1484,6 +1489,30 @@ class WorksheetApp {
     }
 
     return null;
+  }
+
+  private getMathDefinitionInsertionSelection(
+    content: string,
+    selection: TextSelectionOffsets,
+  ): TextSelectionOffsets | null {
+    const definitionOperatorBounds = getDefinitionOperatorBounds(content);
+
+    if (!definitionOperatorBounds || selection.start !== selection.end) {
+      return null;
+    }
+
+    const caretIsInsideDefinition =
+      selection.start > definitionOperatorBounds.start &&
+      selection.start < definitionOperatorBounds.end;
+
+    if (!caretIsInsideDefinition) {
+      return null;
+    }
+
+    return {
+      start: definitionOperatorBounds.end,
+      end: definitionOperatorBounds.end,
+    };
   }
 
   private handleMathDefinitionSpaceCommand(region: TextRegion): boolean {
