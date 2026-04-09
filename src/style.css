@@ -2,6 +2,9 @@
   color: #17324c;
   background: #f7f6ee;
   --worksheet-paper: #f7f6ee;
+  --worksheet-overlay-top: rgba(255, 255, 255, 0.3);
+  --worksheet-overlay-bottom: rgba(255, 255, 255, 0.12);
+  --worksheet-shadow: inset 0 0 32px rgba(255, 255, 255, 0.16);
   --grid-line: rgba(161, 191, 234, 0.7);
   --grid-line-soft: rgba(161, 191, 234, 0.22);
   --caret-color: #17324c;
@@ -10,8 +13,32 @@
   --selection-window-green: rgba(77, 163, 109, 0.2);
   --selection-window-green-edge: rgba(58, 134, 87, 0.72);
   --region-selection-fill: rgba(78, 134, 255, 0.12);
+  --region-boundary: rgba(60, 99, 173, 0.38);
+  --region-boundary-active: rgba(47, 103, 216, 0.55);
   --math-region-color: #2f67d8;
   --text-region-color: #17324c;
+  --grid-size: 20px;
+}
+
+:root[data-theme='dark'] {
+  color: #d9e2f2;
+  background: #16191f;
+  --worksheet-paper: #16191f;
+  --worksheet-overlay-top: rgba(255, 255, 255, 0.04);
+  --worksheet-overlay-bottom: rgba(255, 255, 255, 0.01);
+  --worksheet-shadow: inset 0 0 36px rgba(0, 0, 0, 0.28);
+  --grid-line: rgba(111, 147, 212, 0.42);
+  --grid-line-soft: rgba(111, 147, 212, 0.14);
+  --caret-color: #f0f5ff;
+  --selection-window-blue: rgba(84, 127, 221, 0.24);
+  --selection-window-blue-edge: rgba(110, 155, 255, 0.74);
+  --selection-window-green: rgba(76, 160, 112, 0.22);
+  --selection-window-green-edge: rgba(108, 203, 146, 0.68);
+  --region-selection-fill: rgba(111, 147, 212, 0.14);
+  --region-boundary: rgba(126, 161, 223, 0.38);
+  --region-boundary-active: rgba(146, 183, 255, 0.58);
+  --math-region-color: #7da6ff;
+  --text-region-color: #d9e2f2;
 }
 
 * {
@@ -36,32 +63,32 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  cursor: text;
+  cursor: default;
   outline: none;
   background-color: var(--worksheet-paper);
   background-image:
     linear-gradient(
       to bottom,
-      rgba(255, 255, 255, 0.3),
-      rgba(255, 255, 255, 0.12)
+      var(--worksheet-overlay-top),
+      var(--worksheet-overlay-bottom)
     ),
     repeating-linear-gradient(
       to right,
       transparent 0,
-      transparent 8px,
-      var(--grid-line-soft) 8px,
-      var(--grid-line) 9px,
-      rgba(255, 255, 255, 0.26) 10px
+      transparent calc(var(--grid-size) - 2px),
+      var(--grid-line-soft) calc(var(--grid-size) - 2px),
+      var(--grid-line) calc(var(--grid-size) - 1px),
+      rgba(255, 255, 255, 0.26) var(--grid-size)
     ),
     repeating-linear-gradient(
       to bottom,
       transparent 0,
-      transparent 8px,
-      var(--grid-line-soft) 8px,
-      var(--grid-line) 9px,
-      rgba(255, 255, 255, 0.26) 10px
+      transparent calc(var(--grid-size) - 2px),
+      var(--grid-line-soft) calc(var(--grid-size) - 2px),
+      var(--grid-line) calc(var(--grid-size) - 1px),
+      rgba(255, 255, 255, 0.26) var(--grid-size)
     );
-  box-shadow: inset 0 0 32px rgba(255, 255, 255, 0.16);
+  box-shadow: var(--worksheet-shadow);
 }
 
 .regions-layer {
@@ -74,7 +101,7 @@ body {
   top: 0;
   left: 0;
   width: 2px;
-  height: 10px;
+  height: var(--grid-size);
   background-color: var(--caret-color);
   opacity: 0;
   pointer-events: none;
@@ -111,8 +138,8 @@ body {
     'Avenir Next',
     'Helvetica Neue',
     sans-serif;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: pre;
+  overflow-wrap: normal;
   z-index: 1;
 }
 
@@ -124,8 +151,27 @@ body {
   color: var(--text-region-color);
 }
 
-.text-region--edge-hover {
+.text-region--text-fixed-width {
+  min-width: var(--grid-size);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.text-region--outlined {
+  box-shadow: inset 0 0 0 1px var(--region-boundary);
+  border-radius: 3px;
+}
+
+.text-region--active {
+  box-shadow: inset 0 0 0 1px var(--region-boundary-active);
+}
+
+.text-region--move-hover {
   cursor: move;
+}
+
+.text-region--resize-hover {
+  cursor: ew-resize;
 }
 
 .text-region--selected {
